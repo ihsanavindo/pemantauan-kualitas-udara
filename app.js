@@ -113,8 +113,19 @@ function fmtFixed(v, digits = 2) {
   return Number(v).toFixed(digits);
 }
 function fmtTime(value) {
-  const d = value ? new Date(value) : new Date();
-  if (Number.isNaN(d.getTime())) return String(value);
+  let d = null;
+  if (value != null && value !== "") {
+    const n = Number(value);
+    if (Number.isFinite(n)) {
+      // Angka kecil = detik sejak boot ESP32, bukan waktu nyata
+      if (n > 1e11) d = new Date(n); // ms epoch
+      else if (n > 1e9) d = new Date(n * 1000); // s epoch
+    } else {
+      const parsed = new Date(value);
+      if (!Number.isNaN(parsed.getTime())) d = parsed;
+    }
+  }
+  if (!d || Number.isNaN(d.getTime())) d = new Date();
   return new Intl.DateTimeFormat("id-ID", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Pontianak" }).format(d) + " WIB";
 }
 function merge(base, incoming) {
@@ -177,7 +188,12 @@ function render(data) {
   setText("breakdownKelembapan", Number.isFinite(Number(dht.humidity)) ? fmtFixed(dht.humidity, 2) : "--");
 
   setText("mainPollutant", main ? main.name : "--");
-  setText("mainPollutantValue", main ? `ISPU: ${fmtFixed(main.value, 2)}` : "ISPU: --");
+  if (main) {
+    const conc = main.name === "PM2.5" ? pms.pm25 : pms.pm10;
+    setText("mainPollutantValue", Number.isFinite(Number(conc)) ? `${fmtFixed(conc, 2)} µg/m³` : "-- µg/m³");
+  } else {
+    setText("mainPollutantValue", "--");
+  }
 
   const card = document.getElementById("ispuCard");
   card.className = "card ispu-card reveal visible " + category.key;
