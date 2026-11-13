@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <DHT.h>
 #include <PMS.h>
 #include <math.h>
@@ -12,6 +14,14 @@ const char* WIFI_SSID = "NAMA_WIFI";
 const char* WIFI_PASS = "PASSWORD_WIFI";
 
 WebServer server(80);
+
+// =====================================================
+// KONFIGURASI FIREBASE REALTIME DATABASE
+// ESP32 akan mengirim (PUT) JSON ke /latest.json agar web live
+// =====================================================
+const char* FIREBASE_HOST = "https://monitoring-kualitas-udar-cffd5-default-rtdb.asia-southeast1.firebasedatabase.app";
+const char* FIREBASE_AUTH = ""; // isi token/?auth= jika rules membutuhkan, kosongkan jika test mode (read/write terbuka)
+const bool  FIREBASE_ENABLED = true;
 
 // =====================================================
 // 1. DEFINISI PIN ESP32-S3 & KONSTANTA
@@ -120,9 +130,44 @@ String buildJsonPayload() {
   json += "\"pm10\":" + jsonNumberOrNull(latest.ispuPm10, 2) + ",";
   json += "\"tertinggi\":" + jsonNumberOrNull(latest.ispuTertinggi, 2) + ",";
   json += "\"kategori\":\"" + latest.kategori + "\"";
-  json += "}";
+  json += "},";
+  json += "\"updatedAt\":" + String((unsigned long)(millis() / 1000));
   json += "}";
   return json;
+}
+
+bool sendToFirebase(const String &json) {
+  if (!FIREBASE_ENABLED) return false;
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Firebase: WiFi tidak terhubung, skip kirim.");
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure(); // prototipe: lewati verifikasi sertifikat TLS
+
+  HTTPClient https;
+  String url = String(FIREBASE_HOST) + "/latest.json";
+  if (String(FIREBASE_AUTH).length() > 0) {
+    url += "?auth=" + String(FIREBASE_AUTH);
+  }
+
+  if (!https.begin(client, url)) {
+    Serial.println("Firebase: gagal begin HTTPS.");
+    return false;
+  }
+
+  https.addHeader("Content-Type", "application/json");
+  int httpCode = https.PUT(json);
+  if (httpCode > 0 && httpCode < 300) {
+    Serial.printf("Firebase: update OK (HTTP %d)\n", httpCode);
+    https.end();
+    return true;
+  } else {
+    Serial.printf("Firebase: gagal (HTTP %d) %s\n", httpCode, https.errorToString(httpCode).c_str());
+    https.end();
+    return false;
+  }
 }
 
 void handleData() {
@@ -482,8 +527,12 @@ void sampleSensors() {
   Serial.println("===============================================");
 
   // Output JSON satu baris (opsional, berguna untuk jembatan serial/USB)
+  String payload = buildJsonPayload();
   Serial.print("JSON:");
-  Serial.println(buildJsonPayload());
+  Serial.println(payload);
+
+  // Kirim ke Firebase Realtime Database agar web bisa live
+  sendToFirebase(payload);
 }
 
 // =====================================================

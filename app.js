@@ -1,14 +1,24 @@
-// Konfigurasi: set URL endpoint JSON dari ESP32 (kosongkan untuk data contoh).
-// Contoh payload yang didukung (sesuai output serial):
-// {
-//   "pms5003": { "pm25": 33.00, "pm10": 41.00 },
-//   "mq7": { "adcRaw": 471, "adcFiltered": 471.00, "voltageMv": 838.00, "coPpm": 0.14 },
-//   "dht22": { "temperature": 31.70, "humidity": 76.30 },
-//   "ispu": { "pm25": 71.93, "pm10": 41.00, "tertinggi": 71.93, "kategori": "SEDANG" },
-//   "updatedAt": "2026-11-13T22:00:00+07:00"
-// }
+// Konfigurasi sumber data:
+// - "firebase": live realtime dari Firebase Realtime Database (cocok untuk GitHub Pages/HTTPS)
+// - "http": polling JSON dari endpoint lokal ESP32 (mis. http://192.168.x.x/data) — cocok saat dibuka via localhost di WiFi yang sama
+const DATA_MODE = "firebase";
+
+// HTTP (mode "http")
 const DATA_ENDPOINT = "http://192.168.1.34/data"; // contoh: "http://192.168.1.50/data"
 const POLL_INTERVAL_MS = 10000;
+
+// Firebase Realtime Database (mode "firebase")
+const firebaseConfig = {
+  apiKey: "AIzaSyCwVGsogTitoABuuPRxVaj7EXX7MwUbZwI",
+  authDomain: "monitoring-kualitas-udar-cffd5.firebaseapp.com",
+  databaseURL: "https://monitoring-kualitas-udar-cffd5-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "monitoring-kualitas-udar-cffd5",
+  storageBucket: "monitoring-kualitas-udar-cffd5.firebasestorage.app",
+  messagingSenderId: "248996760386",
+  appId: "1:248996760386:web:9c14dd5733ec11598396db"
+};
+
+const RTDB_PATH = "latest"; // path data yang dikirim ESP32 (PUT ke /latest.json)
 
 const station = {
   location: "Lab Workshop, Resiskom, Universitas Tanjungpura",
@@ -221,9 +231,53 @@ async function loadData() {
   render(current);
 }
 
+function startFirebase() {
+  if (typeof firebase === "undefined") {
+    setDataSourceStatus("disconnected", "Sumber: Firebase (SDK tidak dimuat)");
+    render(merge(structuredClone(sampleData), {}));
+    return;
+  }
+  try {
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+    const ref = db.ref(RTDB_PATH);
+
+    setDataSourceStatus("disconnected", "Sumber: Firebase (menghubungkan...)");
+    render(merge(structuredClone(sampleData), {}));
+
+    ref.on(
+      "value",
+      (snapshot) => {
+        const val = snapshot.val();
+        if (val && typeof val === "object") {
+          const current = merge(structuredClone(sampleData), val);
+          setDataSourceStatus("connected", "Sumber: Firebase (live)");
+          render(current);
+        } else {
+          setDataSourceStatus("disconnected", "Sumber: Firebase (menunggu data)");
+          render(merge(structuredClone(sampleData), {}));
+        }
+      },
+      (err) => {
+        console.warn("Firebase read error:", err);
+        setDataSourceStatus("disconnected", "Sumber: Firebase (gagal akses)");
+        render(merge(structuredClone(sampleData), {}));
+      }
+    );
+  } catch (e) {
+    console.warn("Firebase init error:", e);
+    setDataSourceStatus("disconnected", "Sumber: Firebase (gagal inisialisasi)");
+    render(merge(structuredClone(sampleData), {}));
+  }
+}
+
 (async function main() {
   initMap();
   revealOnLoad();
-  await loadData();
-  if (DATA_ENDPOINT) setInterval(loadData, POLL_INTERVAL_MS);
+  if (DATA_MODE === "firebase") {
+    startFirebase();
+  } else {
+    await loadData();
+    if (DATA_ENDPOINT) setInterval(loadData, POLL_INTERVAL_MS);
+  }
 })();
