@@ -18,6 +18,7 @@ WebServer server(80);
 // =====================================================
 // KONFIGURASI FIREBASE REALTIME DATABASE
 // ESP32 akan mengirim (PUT) JSON ke /latest.json agar web live
+// (set FIREBASE_ENABLED = false jika terjadi crash/boot loop)
 // =====================================================
 const char* FIREBASE_HOST = "https://monitoring-kualitas-udar-cffd5-default-rtdb.asia-southeast1.firebasedatabase.app";
 const char* FIREBASE_AUTH = ""; // isi token/?auth= jika rules membutuhkan, kosongkan jika test mode (read/write terbuka)
@@ -109,7 +110,7 @@ void addCorsHeaders() {
   server.sendHeader("Cache-Control", "no-store");
 }
 
-String buildJsonPayload() {
+String buildJsonPayload(bool useServerTimestamp = false) {
   String json = "{";
   json += "\"pms5003\":{";
   json += "\"pm25\":" + jsonNumberOrNull(latest.pm25, 2) + ",";
@@ -131,7 +132,11 @@ String buildJsonPayload() {
   json += "\"tertinggi\":" + jsonNumberOrNull(latest.ispuTertinggi, 2) + ",";
   json += "\"kategori\":\"" + latest.kategori + "\"";
   json += "},";
-  json += "\"updatedAt\":" + String((unsigned long)(millis() / 1000));
+  if (useServerTimestamp) {
+    json += "\"updatedAt\":{\".sv\":\"timestamp\"}";
+  } else {
+    json += "\"updatedAt\":" + String((unsigned long)(millis() / 1000));
+  }
   json += "}";
   return json;
 }
@@ -345,7 +350,6 @@ void connectWiFi() {
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
-    server.handleClient(); // tetap responsif jika ada request lokal/jaringan
     if (millis() - start > 20000) {
       Serial.println("\nGagal terhubung WiFi (timeout). Akan mencoba ulang otomatis di background.");
       Serial.println("Pastikan: SSID/password benar, WiFi 2.4GHz, dan sinyal stabil.");
@@ -381,14 +385,45 @@ void setup() {
   analogSetPinAttenuation(MQ7_PIN, ADC_11db);
 
   Serial.println("Inisialisasi sensor selesai.");
+  delay(100);
+
+  Serial.println("Memulai koneksi WiFi...");
+  connectWiFi();
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/data", HTTP_GET, handleData);
   server.on("/data", HTTP_OPTIONS, handleOptions);
   server.begin();
-  Serial.println("WebServer aktif (akan melayani /data saat WiFi terhubung).");
+  Serial.println("WebServer aktif (endpoint /data).");
+}
 
-  connectWiFi();
+void printMedianFilterResult(const char* label, const MedianFilter &filter, float rawValue, float filteredValue, const char* unit, int rawDigits = 2) {
+  Serial.printf("%-11s | Raw: ", label);
+  if (isnan(rawValue) || isinf(rawValue)) {
+    Serial.print("N/A");
+  } else {
+    Serial.print(rawValue, rawDigits);
+  }
+
+  Serial.printf(" | Sampel (%d/%d): [", filter.count, WINDOW_SIZE);
+  int start = (filter.count < WINDOW_SIZE) ? 0 : filter.index;
+  for (int i = 0; i < filter.count; i++) {
+    int idx = (start + i) % WINDOW_SIZE;
+    Serial.print(filter.samples[idx], rawDigits);
+    if (i < filter.count - 1) Serial.print(", ");
+  }
+  Serial.print("] | Median: ");
+
+  if (isnan(filteredValue) || isinf(filteredValue)) {
+    Serial.println("Belum tersedia");
+  } else {
+    Serial.print(filteredValue, 2);
+    if (unit && unit[0] != '\0') {
+      Serial.print(" ");
+      Serial.print(unit);
+    }
+    Serial.println();
+  }
 }
 
 // =====================================================
@@ -424,10 +459,14 @@ void sampleSensors() {
   // C. PEMBACAAN SENSOR PMS5003
   // ---------------------------------------------------
   bool pmsReady = pms.readUntil(data, 2000);
+  float pm25Raw = NAN;
+  float pm10Raw = NAN;
 
   if (pmsReady) {
-    tambahSampel(filterPM25, data.PM_AE_UG_2_5);
-    tambahSampel(filterPM10, data.PM_AE_UG_10_0);
+    pm25Raw = data.PM_AE_UG_2_5;
+    pm10Raw = data.PM_AE_UG_10_0;
+    tambahSampel(filterPM25, pm25Raw);
+    tambahSampel(filterPM10, pm10Raw);
     latest.hasPms = true;
   }
 
@@ -509,6 +548,14 @@ void sampleSensors() {
     Serial.println("Data belum tersedia.");
   }
 
+  // Output Hasil Median Filter (Raw, Window Sampel, dan Nilai Median)
+  Serial.printf("\n[HASIL MEDIAN FILTER (Window = %d)]\n", WINDOW_SIZE);
+  printMedianFilterResult("PM2.5", filterPM25, pm25Raw, pm25Filtered, "ug/m3", 2);
+  printMedianFilterResult("PM10", filterPM10, pm10Raw, pm10Filtered, "ug/m3", 2);
+  printMedianFilterResult("MQ-7 ADC", filterMQ7, (float)mq7Raw, mq7Filtered, "", 0);
+  printMedianFilterResult("Suhu", filterSuhu, suhuRaw, suhuFiltered, "°C", 2);
+  printMedianFilterResult("Kelembapan", filterKelembaban, kelembabanRaw, kelembabanFiltered, "%", 2);
+
   // Output ISPU
   Serial.println("\n[HASIL ISPU]");
   if (!isnan(ispuPM25)) {
@@ -527,12 +574,11 @@ void sampleSensors() {
   Serial.println("===============================================");
 
   // Output JSON satu baris (opsional, berguna untuk jembatan serial/USB)
-  String payload = buildJsonPayload();
   Serial.print("JSON:");
-  Serial.println(payload);
+  Serial.println(buildJsonPayload(false));
 
   // Kirim ke Firebase Realtime Database agar web bisa live
-  sendToFirebase(payload);
+  sendToFirebase(buildJsonPayload(true));
 }
 
 // =====================================================
