@@ -134,11 +134,7 @@ function fmtTime(value) {
   }).format(new Date(ts)) + " WIB";
 }
 function renderUpdatedAt(timestampMs) {
-  if (timestampMs == null) {
-    setText("updatedAt", "Menunggu data...");
-    return;
-  }
-  setText("updatedAt", `Update: ${fmtTime(timestampMs)}`);
+  setText("updatedAt", fmtTime(timestampMs));
 }
 function merge(base, incoming) {
   if (!incoming || typeof incoming !== "object") return base;
