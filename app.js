@@ -231,8 +231,10 @@ function initMap() {
 async function loadData() {
   let current = merge(structuredClone(sampleData), {});
   if (DATA_ENDPOINT) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
     try {
-      const res = await fetch(DATA_ENDPOINT, { cache: "no-store" });
+      const res = await fetch(DATA_ENDPOINT, { cache: "no-store", signal: controller.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       current = merge(current, json);
@@ -240,6 +242,8 @@ async function loadData() {
     } catch (err) {
       setDataSourceStatus("disconnected", "ESP32 (terputus)");
       console.warn("Gagal memuat data ESP32:", err);
+    } finally {
+      clearTimeout(timer);
     }
   } else {
     setDataSourceStatus("sample", "Data contoh (ESP32)");
@@ -247,7 +251,7 @@ async function loadData() {
   render(current);
 }
 
-const ESP32_OFFLINE_TIMEOUT_MS = 20000;
+const ESP32_OFFLINE_TIMEOUT_MS = 12000;
 
 function startFirebase() {
   if (typeof firebase === "undefined") {
@@ -261,54 +265,46 @@ function startFirebase() {
     const ref = db.ref(RTDB_PATH);
 
     let serverTimeOffset = 0;
-    let offlineTimer = null;
+    let hasServerTimeOffset = false;
+    let isFirebaseConnected = false;
+    let hasSeenFirebaseConnect = false;
     let latestVal = null;
-    let hasReceivedInitialSnapshot = false;
-    let sawLiveUpdate = false;
-
-    const clearOfflineTimer = () => {
-      if (offlineTimer) {
-        clearTimeout(offlineTimer);
-        offlineTimer = null;
-      }
-    };
-
-    const scheduleOfflineCheck = (delayMs) => {
-      clearOfflineTimer();
-      offlineTimer = setTimeout(() => {
-        setDataSourceStatus("disconnected", "ESP32 (terputus)");
-      }, Math.max(1000, delayMs));
-    };
+    let lastUpdatedAtMs = null;
+    let lastRawUpdatedAt = null;
+    let lastLiveChangeAt = null;
 
     const updateConnectionState = () => {
       if (!latestVal || typeof latestVal !== "object") {
-        clearOfflineTimer();
         setDataSourceStatus("disconnected", "ESP32 (terputus)");
         return;
       }
 
-      const rawUpdatedAt = Number(latestVal.updatedAt);
-      const updatedAtMs = Number.isFinite(rawUpdatedAt)
-        ? (rawUpdatedAt > 1e11 ? rawUpdatedAt : (rawUpdatedAt > 1e9 ? rawUpdatedAt * 1000 : null))
-        : null;
+      if (hasSeenFirebaseConnect && !isFirebaseConnected) {
+        setDataSourceStatus("disconnected", "ESP32 (terputus)");
+        return;
+      }
 
-      if (updatedAtMs !== null) {
-        const ageMs = (Date.now() + serverTimeOffset) - updatedAtMs;
-        if (ageMs <= ESP32_OFFLINE_TIMEOUT_MS) {
+      if (lastUpdatedAtMs !== null) {
+        if (hasServerTimeOffset) {
+          const ageMs = (Date.now() + serverTimeOffset) - lastUpdatedAtMs;
+          if (ageMs <= ESP32_OFFLINE_TIMEOUT_MS) {
+            setDataSourceStatus("connected", "ESP32 (terhubung)");
+          } else {
+            setDataSourceStatus("disconnected", "ESP32 (terputus)");
+          }
+          return;
+        }
+        if (lastLiveChangeAt !== null && (Date.now() - lastLiveChangeAt) <= ESP32_OFFLINE_TIMEOUT_MS) {
           setDataSourceStatus("connected", "ESP32 (terhubung)");
-          scheduleOfflineCheck(ESP32_OFFLINE_TIMEOUT_MS - Math.max(0, ageMs) + 500);
         } else {
-          clearOfflineTimer();
           setDataSourceStatus("disconnected", "ESP32 (terputus)");
         }
         return;
       }
 
-      if (sawLiveUpdate) {
+      if (lastLiveChangeAt !== null && (Date.now() - lastLiveChangeAt) <= ESP32_OFFLINE_TIMEOUT_MS) {
         setDataSourceStatus("connected", "ESP32 (terhubung)");
-        scheduleOfflineCheck(ESP32_OFFLINE_TIMEOUT_MS);
       } else {
-        clearOfflineTimer();
         setDataSourceStatus("disconnected", "ESP32 (terputus)");
       }
     };
@@ -316,28 +312,52 @@ function startFirebase() {
     setDataSourceStatus("disconnected", "ESP32 (terputus)");
     render(merge(structuredClone(sampleData), {}));
 
+    db.ref(".info/connected").on("value", (connSnap) => {
+      isFirebaseConnected = Boolean(connSnap.val());
+      if (isFirebaseConnected) hasSeenFirebaseConnect = true;
+      updateConnectionState();
+    });
+
     db.ref(".info/serverTimeOffset").on("value", (offsetSnap) => {
       const offset = offsetSnap.val();
       if (typeof offset === "number" && Number.isFinite(offset)) {
         serverTimeOffset = offset;
-        if (latestVal) updateConnectionState();
+        hasServerTimeOffset = true;
+        updateConnectionState();
       }
     });
+
+    setInterval(updateConnectionState, 1000);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) updateConnectionState();
+    });
+    window.addEventListener("focus", updateConnectionState);
 
     ref.on(
       "value",
       (snapshot) => {
         const val = snapshot.val();
         if (val && typeof val === "object") {
-          if (hasReceivedInitialSnapshot) sawLiveUpdate = true;
-          hasReceivedInitialSnapshot = true;
+          const rawUpdatedAt = val.updatedAt ?? null;
+          const numUpdatedAt = Number(rawUpdatedAt);
+          const updatedAtMs = Number.isFinite(numUpdatedAt)
+            ? (numUpdatedAt > 1e11 ? numUpdatedAt : (numUpdatedAt > 1e9 ? numUpdatedAt * 1000 : null))
+            : null;
+
+          if (lastRawUpdatedAt !== null && rawUpdatedAt !== lastRawUpdatedAt) {
+            lastLiveChangeAt = Date.now();
+          }
+          lastRawUpdatedAt = rawUpdatedAt;
+          lastUpdatedAtMs = updatedAtMs;
           latestVal = val;
+
           const current = merge(structuredClone(sampleData), val);
           render(current);
           updateConnectionState();
         } else {
           latestVal = null;
-          clearOfflineTimer();
+          lastUpdatedAtMs = null;
+          lastRawUpdatedAt = null;
           setDataSourceStatus("disconnected", "ESP32 (terputus)");
           render(merge(structuredClone(sampleData), {}));
         }
@@ -345,7 +365,8 @@ function startFirebase() {
       (err) => {
         console.warn("Firebase read error:", err);
         latestVal = null;
-        clearOfflineTimer();
+        lastUpdatedAtMs = null;
+        lastRawUpdatedAt = null;
         setDataSourceStatus("disconnected", "ESP32 (terputus)");
         render(merge(structuredClone(sampleData), {}));
       }
