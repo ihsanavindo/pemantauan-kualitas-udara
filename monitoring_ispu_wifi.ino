@@ -213,28 +213,30 @@ void tambahSampel(MedianFilter &filter, float nilai) {
 // =====================================================
 // 6. FUNGSI MEDIAN FILTER
 // =====================================================
+void urutkanSampel(const MedianFilter &filter, float out[WINDOW_SIZE]) {
+  for (int i = 0; i < filter.count; i++) {
+    out[i] = filter.samples[i];
+  }
+
+  // Mengurutkan data dari kecil ke besar (Bubble Sort)
+  for (int i = 0; i < filter.count - 1; i++) {
+    for (int j = 0; j < filter.count - i - 1; j++) {
+      if (out[j] > out[j + 1]) {
+        float swap = out[j];
+        out[j] = out[j + 1];
+        out[j + 1] = swap;
+      }
+    }
+  }
+}
+
 float medianFilter(MedianFilter &filter) {
   if (filter.count == 0) {
     return NAN;
   }
 
   float temp[WINDOW_SIZE];
-
-  // Menyalin data sampel
-  for (int i = 0; i < filter.count; i++) {
-    temp[i] = filter.samples[i];
-  }
-
-  // Mengurutkan data dari kecil ke besar (Bubble Sort)
-  for (int i = 0; i < filter.count - 1; i++) {
-    for (int j = 0; j < filter.count - i - 1; j++) {
-      if (temp[j] > temp[j + 1]) {
-        float swap = temp[j];
-        temp[j] = temp[j + 1];
-        temp[j + 1] = swap;
-      }
-    }
-  }
+  urutkanSampel(filter, temp);
 
   // Mengambil nilai tengah
   if (filter.count % 2 == 1) {
@@ -410,6 +412,14 @@ void printMedianFilterResult(const char* label, const MedianFilter &filter, floa
   for (int i = 0; i < filter.count; i++) {
     int idx = (start + i) % WINDOW_SIZE;
     Serial.print(filter.samples[idx], rawDigits);
+    if (i < filter.count - 1) Serial.print(", ");
+  }
+
+  float sorted[WINDOW_SIZE];
+  urutkanSampel(filter, sorted);
+  Serial.print("] | Sorted: [");
+  for (int i = 0; i < filter.count; i++) {
+    Serial.print(sorted[i], rawDigits);
     if (i < filter.count - 1) Serial.print(", ");
   }
   Serial.print("] | Median: ");

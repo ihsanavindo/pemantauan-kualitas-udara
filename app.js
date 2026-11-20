@@ -129,29 +129,16 @@ function fmtTime(value) {
   if (ts == null) return "Menunggu data...";
   return new Intl.DateTimeFormat("id-ID", {
     dateStyle: "full",
-    timeStyle: "medium",
+    timeStyle: "short",
     timeZone: "Asia/Pontianak",
   }).format(new Date(ts)) + " WIB";
 }
-function fmtDelay(delayMs) {
-  const totalSec = Math.max(0, Math.floor(delayMs / 1000));
-  if (totalSec < 60) return `${totalSec} detik`;
-  const totalMin = Math.floor(totalSec / 60);
-  const sec = totalSec % 60;
-  if (totalMin < 60) return `${totalMin} menit ${sec} detik`;
-  const totalHour = Math.floor(totalMin / 60);
-  const min = totalMin % 60;
-  if (totalHour < 24) return `${totalHour} jam ${min} menit`;
-  const days = Math.floor(totalHour / 24);
-  const hours = totalHour % 24;
-  return `${days} hari ${hours} jam`;
-}
-function renderUpdatedAt(timestampMs, referenceNowMs = Date.now()) {
+function renderUpdatedAt(timestampMs) {
   if (timestampMs == null) {
     setText("updatedAt", "Menunggu data...");
     return;
   }
-  setText("updatedAt", `Update: ${fmtTime(timestampMs)} (delay ${fmtDelay(referenceNowMs - timestampMs)})`);
+  setText("updatedAt", `Update: ${fmtTime(timestampMs)}`);
 }
 function merge(base, incoming) {
   if (!incoming || typeof incoming !== "object") return base;
@@ -186,7 +173,7 @@ function revealOnLoad() {
   els.forEach((el, i) => setTimeout(() => el.classList.add("visible"), 80 + i * 90));
 }
 
-function render(data, referenceNowMs = Date.now(), fallbackTimestampMs = null) {
+function render(data, fallbackTimestampMs = null) {
   const ispu = data.ispu || {};
   const pms = data.pms5003 || {};
   const mq7 = data.mq7 || {};
@@ -199,7 +186,7 @@ function render(data, referenceNowMs = Date.now(), fallbackTimestampMs = null) {
 
   setText("locationName", station.location);
   setText("locationArea", station.area);
-  renderUpdatedAt(updatedAtMs, referenceNowMs);
+  renderUpdatedAt(updatedAtMs);
 
   setText("ispuTertinggi", Number.isFinite(Number(tertinggi)) ? fmtFixed(tertinggi, 2) : "--");
   setText("hasilIspuTertinggi", Number.isFinite(Number(tertinggi)) ? fmtFixed(tertinggi, 2) : "--");
@@ -255,7 +242,6 @@ function initMap() {
 }
 
 let httpLastUpdatedMs = null;
-let httpDelayTimer = null;
 
 async function loadData() {
   let current = merge(structuredClone(sampleData), {});
@@ -268,9 +254,6 @@ async function loadData() {
       const json = await res.json();
       current = merge(current, json);
       httpLastUpdatedMs = parseTimestampMs(current.updatedAt) ?? Date.now();
-      if (!httpDelayTimer) {
-        httpDelayTimer = setInterval(() => renderUpdatedAt(httpLastUpdatedMs), 1000);
-      }
       setDataSourceStatus("connected", "ESP32 (terhubung)");
     } catch (err) {
       setDataSourceStatus("disconnected", "ESP32 (terputus)");
@@ -281,7 +264,7 @@ async function loadData() {
   } else {
     setDataSourceStatus("sample", "Data contoh (ESP32)");
   }
-  render(current, Date.now(), httpLastUpdatedMs);
+  render(current, httpLastUpdatedMs);
 }
 
 const ESP32_OFFLINE_TIMEOUT_MS = 12000;
@@ -305,17 +288,8 @@ function startFirebase() {
     let lastUpdatedAtMs = null;
     let lastRawUpdatedAt = null;
     let lastLiveChangeAt = null;
-    let lastFallbackSnapshotAt = null;
-
-    const refreshTimeDisplay = () => {
-      const displayTs = lastUpdatedAtMs ?? lastFallbackSnapshotAt;
-      const nowRef = lastUpdatedAtMs != null ? (Date.now() + serverTimeOffset) : Date.now();
-      renderUpdatedAt(displayTs, nowRef);
-    };
 
     const updateConnectionState = () => {
-      refreshTimeDisplay();
-
       if (!latestVal || typeof latestVal !== "object") {
         setDataSourceStatus("disconnected", "ESP32 (terputus)");
         return;
@@ -388,18 +362,16 @@ function startFirebase() {
           }
           lastRawUpdatedAt = rawUpdatedAt;
           lastUpdatedAtMs = updatedAtMs;
-          lastFallbackSnapshotAt = updatedAtMs === null ? Date.now() : null;
           latestVal = val;
 
+          const fallbackTs = updatedAtMs === null ? Date.now() : null;
           const current = merge(structuredClone(sampleData), val);
-          const nowRef = updatedAtMs != null ? (Date.now() + serverTimeOffset) : Date.now();
-          render(current, nowRef, lastFallbackSnapshotAt);
+          render(current, fallbackTs);
           updateConnectionState();
         } else {
           latestVal = null;
           lastUpdatedAtMs = null;
           lastRawUpdatedAt = null;
-          lastFallbackSnapshotAt = null;
           setDataSourceStatus("disconnected", "ESP32 (terputus)");
           render(merge(structuredClone(sampleData), {}));
         }
@@ -409,7 +381,6 @@ function startFirebase() {
         latestVal = null;
         lastUpdatedAtMs = null;
         lastRawUpdatedAt = null;
-        lastFallbackSnapshotAt = null;
         setDataSourceStatus("disconnected", "ESP32 (terputus)");
         render(merge(structuredClone(sampleData), {}));
       }
