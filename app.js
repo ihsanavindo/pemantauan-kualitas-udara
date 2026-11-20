@@ -112,21 +112,46 @@ function fmtFixed(v, digits = 2) {
   if (v == null || v === "" || Number.isNaN(Number(v))) return "--";
   return Number(v).toFixed(digits);
 }
-function fmtTime(value) {
-  let d = null;
-  if (value != null && value !== "") {
-    const n = Number(value);
-    if (Number.isFinite(n)) {
-      // Angka kecil = detik sejak boot ESP32, bukan waktu nyata
-      if (n > 1e11) d = new Date(n); // ms epoch
-      else if (n > 1e9) d = new Date(n * 1000); // s epoch
-    } else {
-      const parsed = new Date(value);
-      if (!Number.isNaN(parsed.getTime())) d = parsed;
-    }
+function parseTimestampMs(value) {
+  if (value == null || value === "") return null;
+  const n = Number(value);
+  if (Number.isFinite(n)) {
+    // Angka kecil = detik sejak boot ESP32, bukan waktu nyata
+    if (n > 1e11) return n; // ms epoch
+    if (n > 1e9) return n * 1000; // s epoch
+    return null;
   }
-  if (!d || Number.isNaN(d.getTime())) d = new Date();
-  return new Intl.DateTimeFormat("id-ID", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Pontianak" }).format(d) + " WIB";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
+}
+function fmtTime(value) {
+  const ts = parseTimestampMs(value);
+  if (ts == null) return "Menunggu data...";
+  return new Intl.DateTimeFormat("id-ID", {
+    dateStyle: "full",
+    timeStyle: "medium",
+    timeZone: "Asia/Pontianak",
+  }).format(new Date(ts)) + " WIB";
+}
+function fmtDelay(delayMs) {
+  const totalSec = Math.max(0, Math.floor(delayMs / 1000));
+  if (totalSec < 60) return `${totalSec} detik`;
+  const totalMin = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  if (totalMin < 60) return `${totalMin} menit ${sec} detik`;
+  const totalHour = Math.floor(totalMin / 60);
+  const min = totalMin % 60;
+  if (totalHour < 24) return `${totalHour} jam ${min} menit`;
+  const days = Math.floor(totalHour / 24);
+  const hours = totalHour % 24;
+  return `${days} hari ${hours} jam`;
+}
+function renderUpdatedAt(timestampMs, referenceNowMs = Date.now()) {
+  if (timestampMs == null) {
+    setText("updatedAt", "Menunggu data...");
+    return;
+  }
+  setText("updatedAt", `Update: ${fmtTime(timestampMs)} (delay ${fmtDelay(referenceNowMs - timestampMs)})`);
 }
 function merge(base, incoming) {
   if (!incoming || typeof incoming !== "object") return base;
@@ -161,7 +186,7 @@ function revealOnLoad() {
   els.forEach((el, i) => setTimeout(() => el.classList.add("visible"), 80 + i * 90));
 }
 
-function render(data) {
+function render(data, referenceNowMs = Date.now(), fallbackTimestampMs = null) {
   const ispu = data.ispu || {};
   const pms = data.pms5003 || {};
   const mq7 = data.mq7 || {};
@@ -170,10 +195,11 @@ function render(data) {
   const tertinggi = ispu.tertinggi ?? ispu.ispuTertinggi ?? Math.max(Number(ispu.pm25) || 0, Number(ispu.pm10) || 0);
   const category = normalizeCategory(ispu.kategori || ispu.kategoriUdara, tertinggi);
   const main = getMainPollutant(ispu);
+  const updatedAtMs = parseTimestampMs(data.updatedAt) ?? fallbackTimestampMs;
 
   setText("locationName", station.location);
   setText("locationArea", station.area);
-  setText("updatedAt", fmtTime(data.updatedAt));
+  renderUpdatedAt(updatedAtMs, referenceNowMs);
 
   setText("ispuTertinggi", Number.isFinite(Number(tertinggi)) ? fmtFixed(tertinggi, 2) : "--");
   setText("hasilIspuTertinggi", Number.isFinite(Number(tertinggi)) ? fmtFixed(tertinggi, 2) : "--");
@@ -228,6 +254,9 @@ function initMap() {
   document.getElementById("mapLink").href = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=17/${lat}/${lng}`;
 }
 
+let httpLastUpdatedMs = null;
+let httpDelayTimer = null;
+
 async function loadData() {
   let current = merge(structuredClone(sampleData), {});
   if (DATA_ENDPOINT) {
@@ -238,6 +267,10 @@ async function loadData() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       current = merge(current, json);
+      httpLastUpdatedMs = parseTimestampMs(current.updatedAt) ?? Date.now();
+      if (!httpDelayTimer) {
+        httpDelayTimer = setInterval(() => renderUpdatedAt(httpLastUpdatedMs), 1000);
+      }
       setDataSourceStatus("connected", "ESP32 (terhubung)");
     } catch (err) {
       setDataSourceStatus("disconnected", "ESP32 (terputus)");
@@ -248,7 +281,7 @@ async function loadData() {
   } else {
     setDataSourceStatus("sample", "Data contoh (ESP32)");
   }
-  render(current);
+  render(current, Date.now(), httpLastUpdatedMs);
 }
 
 const ESP32_OFFLINE_TIMEOUT_MS = 12000;
@@ -272,8 +305,17 @@ function startFirebase() {
     let lastUpdatedAtMs = null;
     let lastRawUpdatedAt = null;
     let lastLiveChangeAt = null;
+    let lastFallbackSnapshotAt = null;
+
+    const refreshTimeDisplay = () => {
+      const displayTs = lastUpdatedAtMs ?? lastFallbackSnapshotAt;
+      const nowRef = lastUpdatedAtMs != null ? (Date.now() + serverTimeOffset) : Date.now();
+      renderUpdatedAt(displayTs, nowRef);
+    };
 
     const updateConnectionState = () => {
+      refreshTimeDisplay();
+
       if (!latestVal || typeof latestVal !== "object") {
         setDataSourceStatus("disconnected", "ESP32 (terputus)");
         return;
@@ -339,25 +381,25 @@ function startFirebase() {
         const val = snapshot.val();
         if (val && typeof val === "object") {
           const rawUpdatedAt = val.updatedAt ?? null;
-          const numUpdatedAt = Number(rawUpdatedAt);
-          const updatedAtMs = Number.isFinite(numUpdatedAt)
-            ? (numUpdatedAt > 1e11 ? numUpdatedAt : (numUpdatedAt > 1e9 ? numUpdatedAt * 1000 : null))
-            : null;
+          const updatedAtMs = parseTimestampMs(rawUpdatedAt);
 
           if (lastRawUpdatedAt !== null && rawUpdatedAt !== lastRawUpdatedAt) {
             lastLiveChangeAt = Date.now();
           }
           lastRawUpdatedAt = rawUpdatedAt;
           lastUpdatedAtMs = updatedAtMs;
+          lastFallbackSnapshotAt = updatedAtMs === null ? Date.now() : null;
           latestVal = val;
 
           const current = merge(structuredClone(sampleData), val);
-          render(current);
+          const nowRef = updatedAtMs != null ? (Date.now() + serverTimeOffset) : Date.now();
+          render(current, nowRef, lastFallbackSnapshotAt);
           updateConnectionState();
         } else {
           latestVal = null;
           lastUpdatedAtMs = null;
           lastRawUpdatedAt = null;
+          lastFallbackSnapshotAt = null;
           setDataSourceStatus("disconnected", "ESP32 (terputus)");
           render(merge(structuredClone(sampleData), {}));
         }
@@ -367,6 +409,7 @@ function startFirebase() {
         latestVal = null;
         lastUpdatedAtMs = null;
         lastRawUpdatedAt = null;
+        lastFallbackSnapshotAt = null;
         setDataSourceStatus("disconnected", "ESP32 (terputus)");
         render(merge(structuredClone(sampleData), {}));
       }
